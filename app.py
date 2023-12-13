@@ -3,7 +3,7 @@ import time
 import numpy as np
 import tensorflow as tf
 from PIL import Image
-from flask import Flask, render_template, Response
+from flask import Flask, render_template, Response, flash, jsonify
 import cv2
 from mtcnn import MTCNN
 from keras.models import load_model
@@ -55,71 +55,86 @@ def are_eyes_closed(eyes):
         return True
 
 
+prediction = []
+
+
 def generate_frames():
     i = 0
-    prediction = []
+    timey = 0
     while True:
-        i += 1
         ## read the camera frame
         success, frame = camera.read()
-        if not success:
-            break
-        else:
-            detector = cv2.CascadeClassifier('Haarcascades/haarcascade_frontalface_default.xml')
-            faces = detector.detectMultiScale(frame, 1.1, 7)
-
-            # Draw the rectangle around each face
-            for (x, y, w, h) in faces:
-                cv2.rectangle(frame, (x, y), (x + w, y + h), (0, 0, 255), 2)
-
-            # select the frame from the video
-            cropped_face = crop_face_and_return(frame)
-            if cropped_face is not None:
-                # Convert the NumPy array 'cropped_face' into a PIL Image
-                pil_image = Image.fromarray(cropped_face, 'RGB')
-
-                pil_image = pil_image.resize((SIZE, SIZE))
-
-                cropped_face = np.array(pil_image)
-
-                image = tf.reshape(cropped_face, (1, SIZE, SIZE, 3))
-
-                # output the prediction text
-                pred = VGG16_model.predict(image)
-                prediction.append(np.argmax(pred))
-
-
-
+        if time.time() - timey > 5:
+            timey = time.time()
+            i += 1
+            if not success:
+                break
             else:
-                eye_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_eye.xml')
-                gray_image = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+                detector = cv2.CascadeClassifier('Haarcascades/haarcascade_frontalface_default.xml')
+                faces = detector.detectMultiScale(frame, 1.1, 7)
 
-                # Perform eye detection
-                eyes = eye_cascade.detectMultiScale(gray_image, scaleFactor=1.1, minNeighbors=15)
-                if eyes is None:
-                    prediction.append(-1)
-                elif are_eyes_closed(eyes):
-                    prediction.append(1)
+                # Draw the rectangle around each face
+                for (x, y, w, h) in faces:
+                    cv2.rectangle(frame, (x, y), (x + w, y + h), (0, 0, 255), 2)
+
+                # select the frame from the video
+                cropped_face = crop_face_and_return(frame)
+                if cropped_face is not None:
+                    # Convert the NumPy array 'cropped_face' into a PIL Image
+                    pil_image = Image.fromarray(cropped_face, 'RGB')
+
+                    pil_image = pil_image.resize((SIZE, SIZE))
+
+                    cropped_face = np.array(pil_image)
+
+                    image = tf.reshape(cropped_face, (1, SIZE, SIZE, 3))
+
+                    # output the prediction text
+                    pred = VGG16_model.predict(image)
+                    pred = np.argmax(pred)
+                    prediction.append(pred)
+                    print(pred)
+
+
+
                 else:
-                    prediction.append(0)
-            print(prediction)
-            # if prediction == 1:
-            #     render_template("index1.html", prediction_text="Heart Disease detected")
-            # else:
-            #     render_template("index1.html", prediction_text="No Heart Disease")
+                    eye_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_eye.xml')
+                    gray_image = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
 
-        # display the video
+                    # Perform eye detection
+                    eyes = eye_cascade.detectMultiScale(gray_image, scaleFactor=1.1, minNeighbors=15)
+                    if eyes is None:
+                        prediction.append(-1)
+                    elif are_eyes_closed(eyes):
+                        prediction.append(1)
+                    else:
+                        prediction.append(0)
+                print(prediction)
+
+            # display the video
         ret, buffer = cv2.imencode('.jpg', frame)
         frame = buffer.tobytes()
 
         yield (b'--frame\r\n'
                b'Content-Type: image/jpeg\r\n\r\n' + frame + b'\r\n')
-        time.sleep(5)
 
 
 @app.route('/')
 def index():
     return render_template('index.html')
+
+
+@app.route('/_stuff', methods=['GET'])
+def stuff():
+    message = ''
+    l_pred = prediction[-1]
+    if l_pred == 0:
+        message = 'active'
+    elif l_pred == 1:
+        message = 'sleep'
+    else:
+        message = 'yawn'
+    return jsonify(result=message)
 
 
 @app.route('/video')
