@@ -1,37 +1,68 @@
 {% extends "index0.html" %}
 {% block body %}
   <script type="text/javascript">
-    var intervalID = setInterval(update_values,1000);
+    var intervalID = setInterval(update_values,3000);
+
+        function playSound() {
+            var audio = document.getElementById("myAudio");
+            audio.play();
+        }
     
       function update_values() {
             $.getJSON($SCRIPT_ROOT + '/_stuff',
                    
           function(data) {
             $('#result').text(data.result);
-            console.log(data)
+            console.log(data);
+
+            if (data.result === "yawn") {
+            playSound();}
           });
           
         };
-       
-        
-        
+          if($('#result').text(data.result) == "yawn"){
+            playSound();
+          };
         function stopTextColor() {
           clearInterval(intervalID);
         }
         
+        function startText() {
+          intervalID = setInterval(update_values,1000);
+        }
+        
     </script>
     <body onload="update_values();">
-    <h1>Live streaming</h1>
-    <div>
 
-        <img src="{{ url_for('video') }}" width="50%"/>
+    <!-- Audio element -->
+    <audio id="myAudio">
+        <source src="{{ url_for('static', filename='audio/SHINZOU SASAGEYO SOUND EFFECT.mp3') }}" type="audio/mp3">
+        Your browser does not support the audio element.
+    </audio>
+      <nav class="navbar navbar-dark bg-dark">
+        <div class="container">
+            <a class="navbar-brand" href="https://github.com/MohamedHisham20/Hocus_Focus" target="_blank">Hocus Focus</a>
+            <button class="btn btn-outline-secondary my-2 my-sm-0" type="submit">Help</button>
+        </div>
+    </nav>
+    <div class="camera">
+
+        <img id="video" src="{{ url_for('video') }}" width="100%"/>
     </div>
+    <script>
+      document.getElementById("result").innerHTML;
+      </script>
+    <div class="right-container1">
+<img class="flex-image" src="{{ url_for('static', filename='images/logo_trial.jpeg') }}" alt="Logo">
+    </div>
+  <div class="right-container2">
+    <button class="upload-label" onclick="startText();">Start!</button>
+    <button class="btn btn-primary btn-lg " onclick="stopTextColor();">Stop</button>
+  </div>
+  <div class="right-container3">  
     <p>
       <span id="result">?</span>
-  <script>
-  document.getElementById("result").innerHTML;
-  </script>
-  
-    <button onclick="stopTextColor();">Stop</button>
+  </div>
+    <div class="loader" style="display:none;"></div>
     </body>
 {% endblock %}
