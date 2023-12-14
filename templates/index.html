@@ -1,12 +1,12 @@
 {% extends "index0.html" %}
 {% block body %}
   <script type="text/javascript">
-    var intervalID = setInterval(update_values,3000);
+    var intervalID = setInterval(update_values,4000);
 
-        function playSound() {
-            var audio = document.getElementById("myAudio");
-            audio.play();
-        }
+        // function playSound() {
+        //     var audio = document.getElementById("myAudio");
+        //     audio.play();
+        // }
     
       function update_values() {
             $.getJSON($SCRIPT_ROOT + '/_stuff',
