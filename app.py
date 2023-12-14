@@ -1,4 +1,5 @@
 import time
+from math import inf
 
 import numpy as np
 import tensorflow as tf
@@ -10,7 +11,7 @@ from keras.models import load_model
 
 SIZE = 224
 # load the model
-VGG16_model = load_model('model_after_somebalnance.h5')
+VGG16_model = load_model('yarab.h5')
 
 # create the app
 app = Flask(__name__)
@@ -25,12 +26,13 @@ def crop_face_and_return(image):
         cropped_face = image[y:y + h, x:x + w]
     return cropped_face
 
+
 # Function to check if eyes are closed based on aspect ratio
 def are_eyes_closed(eyes):
     awake = 0
     for eye in eyes:
         (x, y, w, h) = eye
-        aspect_ratio = float(w) / h #the greater the value the more sleepy
+        aspect_ratio = float(w) / h  # the greater the value the more sleepy
         # Set a threshold for the aspect ratio to determine closed eyes
         closed_threshold = 5.0  # You may need to adjust this threshold for your specific case
         if aspect_ratio < closed_threshold:
@@ -43,9 +45,13 @@ def are_eyes_closed(eyes):
 
 prediction = []
 
+
 def generate_frames():
     timey = 0
+    i = 0
+    last_pred = 0
     while True:
+        i += 1
         ## read the camera frame
         success, frame = camera.read()
         if time.time() - timey > 5:
@@ -84,8 +90,14 @@ def generate_frames():
                     # output the prediction text
                     pred = VGG16_model.predict(image)
                     pred = np.argmax(pred)
-                    prediction.append(pred)
-
+                    print(pred)
+                    print("last pred",last_pred)
+                    if pred == 1 :
+                        if last_pred == 1:
+                            prediction.append(1)
+                    else:
+                        prediction.append(pred)
+                    last_pred = pred
 
 
                 else:
@@ -97,9 +109,9 @@ def generate_frames():
                     if len(eyes) == 0:
                         prediction.append(-1)
                     elif are_eyes_closed(eyes):
-                        prediction.append(3)
+                        prediction.append(1)
                     else:
-                        prediction.append(4)
+                        prediction.append(0)
                 print(prediction)
 
             # display the video
@@ -119,34 +131,36 @@ def index():
 def stuff():
     message = ''
     if len(prediction):
-        # if len(prediction) % 5 == 0: # each 5 readings of the prediction
-        #     arr = prediction[-5:]
-        #     print(arr)
-        # else:
-        l_pred = prediction[-1]
-        if l_pred == 0:
-            message = 'active'
-        elif l_pred == 2:
-            message = 'yawn'
-        elif l_pred == -1:
-            message = 'absent'
-        elif l_pred == 3:
-            message = 'sleep eye'
-        elif l_pred == 4:
-            message = 'active eye'
+        if len(prediction) % 5 == 0: # each 5 readings of the prediction
+            arr = prediction[-5:]
+            message = 'the average arr'
         else:
-            message = 'sleep'
-    return jsonify(result = message)
+            l_pred = prediction[-1]
+            if l_pred == 0:
+                message = 'active'
+            elif l_pred == 2:
+                message = 'yawn'
+            elif l_pred == -1:
+                message = 'absent'
+            elif l_pred == 3:
+                message = 'sleep eye'
+            elif l_pred == 4:
+                message = 'active eye'
+            else:
+                message = 'sleep'
+    return jsonify(result=message)
 
 
 @app.route('/video')
 def video():
     return Response(generate_frames(), mimetype='multipart/x-mixed-replace; boundary=frame')
 
+
 # Ensure that static files are served
 @app.route('/static/<path:filename>')
 def static_files(filename):
     return send_from_directory('static', filename)
+
 
 if __name__ == "__main__":
     app.run(debug=True)
