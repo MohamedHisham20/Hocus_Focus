@@ -11,7 +11,7 @@ from keras.models import load_model
 
 SIZE = 224
 # load the model
-VGG16_model = load_model('yarab.h5')
+VGG16_model = load_model('hocusfocusplease.h5')
 
 # create the app
 app = Flask(__name__)
@@ -90,28 +90,28 @@ def generate_frames():
                     # output the prediction text
                     pred = VGG16_model.predict(image)
                     pred = np.argmax(pred)
-                    print(pred)
-                    print("last pred",last_pred)
-                    if pred == 1 :
-                        if last_pred == 1:
-                            prediction.append(1)
-                    else:
-                        prediction.append(pred)
-                    last_pred = pred
 
 
-                else:
+                else:  # no face detected
                     # eye_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_eye.xml')
                     # gray_image = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
                     #
                     # # Perform eye detection
                     # eyes = eye_cascade.detectMultiScale(gray_image, scaleFactor=1.1, minNeighbors= 15)
-                    if len(eyes) == 0:
-                        prediction.append(-1)
-                    elif are_eyes_closed(eyes):
-                        prediction.append(1)
-                    else:
-                        prediction.append(0)
+                    if len(eyes) == 0:  # no eyes detected (absent)
+                        pred = -1
+                    elif are_eyes_closed(eyes):  # eyes closed (sleep)
+                        pred = 1
+                    else:  # eyes not closed (active)
+                        pred = 0
+                print(pred)
+                print("last pred", last_pred)
+                if pred == 1 or pred == -1:
+                    if last_pred == pred:
+                        prediction.append(pred)
+                else:
+                    prediction.append(pred)
+                last_pred = pred
                 print(prediction)
 
             # display the video
@@ -127,27 +127,32 @@ def index():
     return render_template('index.html')
 
 
+summ = 0
+
+
 @app.route('/_stuff', methods=['GET'])
 def stuff():
+    global summ
     message = ''
     if len(prediction):
-        if len(prediction) % 5 == 0: # each 5 readings of the prediction
-            arr = prediction[-5:]
-            message = 'the average arr'
+        if len(prediction) % 5 == 0:  # each 5 readings of the prediction
+            avg = (summ / 10) * 100
+            message = 'avg=' + str(round(avg, 2)) + '%'
+            summ = 0
         else:
             l_pred = prediction[-1]
             if l_pred == 0:
                 message = 'active'
+                summ += 2
             elif l_pred == 2:
                 message = 'yawn'
+                # summ -= 1
             elif l_pred == -1:
                 message = 'absent'
-            elif l_pred == 3:
-                message = 'sleep eye'
-            elif l_pred == 4:
-                message = 'active eye'
+                # summ -= 2
             else:
                 message = 'sleep'
+                # summ -= 2
     return jsonify(result=message)
 
 
