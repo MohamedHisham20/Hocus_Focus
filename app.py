@@ -5,8 +5,10 @@ from PIL import Image
 from flask import Flask, render_template, Response, jsonify, send_from_directory
 import cv2
 from keras.models import load_model
+from mtcnn import MTCNN
 
 #size of the image to be given to the model
+
 SIZE = 224
 # load the model
 VGG16_model = load_model('hocusfocusplease.h5')
@@ -28,23 +30,32 @@ def crop_face_and_return(image):
         cropped_face = image[y:y + h, x:x + w]
     return cropped_face
 
+# def crop_face_and_return(image):
+#    cropped_face = None
+#    detector = MTCNN()
+#    faces = detector.detect_faces(image)
+#    if faces:
+#         x, y, width, height = faces[0]['box']
+#         cropped_face = image[y:y + height, x:x + width]
+#    return cropped_face
+
 
 # Function to check if eyes are closed based on aspect ratio
 #takes array of eyes that are detected
-def are_eyes_closed(eyes):
-    awake = 0
-    for eye in eyes:
-        #get the exact ratio of the eye
-        (x, y, w, h) = eye
-        aspect_ratio = float(w) / h  # the greater the value the more sleepy
-        # Set a threshold for the aspect ratio to determine closed eyes
-        closed_threshold = 5.0  # may be modified
-        if aspect_ratio < closed_threshold:
-            awake += 1 #an eye is detected as open
-    if awake > 0:
-        return False
-    else:
-        return True
+# def are_eyes_closed(eyes):
+#     awake = 0
+#     for eye in eyes:
+#         #get the exact ratio of the eye
+#         (x, y, w, h) = eye
+#         aspect_ratio = float(w) / h  # the greater the value the more sleepy
+#         # Set a threshold for the aspect ratio to determine closed eyes
+#         closed_threshold = 5.0  # may be modified
+#         if aspect_ratio < closed_threshold:
+#             awake += 1 #an eye is detected as open
+#     if awake > 0:
+#         return False
+#     else:
+#         return True
 
 
 prediction = [] #prediction array used to calculate the average
@@ -56,7 +67,8 @@ def generate_frames():
     while True:
         ## read the camera frame
         success, frame = camera.read()
-        if time.time() - timey > 5: # enter each 5 seconds
+        frame = cv2.flip(frame,1)
+        if time.time() - timey > 3: # enter each 5 seconds
             timey = time.time() #update the time
             if not success: #couldn't get the camera
                 break
@@ -69,6 +81,7 @@ def generate_frames():
                 faces = detector.detectMultiScale(frame, 1.1, 7)
                 #convert to gray scale to enhance the detection of face and eye
                 gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+                # frameBGR = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
 
                 # Draw the rectangle around each face
                 for (x, y, w, h) in faces:
@@ -104,15 +117,13 @@ def generate_frames():
                 else:  # no face detected
                     if len(eyes) == 0:  # no eyes detected (absent)
                         pred = -1
-                    elif are_eyes_closed(eyes):  # eyes closed (sleep)
-                        pred = 1
-                    else:  # eyes not closed (active)
+                    else:  # there's eyes (active)
                         pred = 0
                 #see the output on the terminal
                 print("last pred", last_pred)
                 print(pred)
 
-                if pred == 1 or pred == -1: #sleep or absent (to eliminate prediction errors)
+                if pred == 1 or pred == -1 or pred == 2: #sleep or absent (to eliminate prediction errors)
                     if last_pred == pred: #check that  it repeated twice in a row
                         prediction.append(pred)
                 else: #any thing other than sleep or absent
@@ -143,9 +154,10 @@ def stuff():
     global timeyy
     message = ''
     if len(prediction): #avoid first empty prediction
-        while time.time() - timeyy > 3: #enter each 5 seconds
+        while time.time() - timeyy > 1: #enter each 4 seconds
             timeyy = time.time()
             if len(prediction) % 5 == 0:  # each 5 readings of the prediction
+                if summ > 5: summ = 5
                 avg = (summ / 5) * 100
                 message = 'avg=' + str(round(avg, 2)) + '%'
                 summ = 0
@@ -158,7 +170,7 @@ def stuff():
                     message = 'yawn'
                 elif l_pred == -1:
                     message = 'absent'
-                else:
+                elif l_pred == 1:
                     message = 'sleep'
     return jsonify(result=message)
 
