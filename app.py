@@ -164,14 +164,12 @@ def stuff():
             else:
                 l_pred = prediction[-1] #get last prediction to display it
                 if l_pred == 0:
-                    message = 'active'
+                    message = 'Engaged'
                     summ += 1
-                elif l_pred == 2:
-                    message = 'yawn'
                 elif l_pred == -1:
-                    message = 'absent'
-                elif l_pred == 1:
-                    message = 'sleep'
+                    message = "Absent"
+                else:
+                    message = "Disengaged"
     return jsonify(result=message)
 
 #app to display the frames
