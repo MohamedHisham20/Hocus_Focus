@@ -82,7 +82,7 @@ def generate_frames():
                 #convert to gray scale to enhance the detection of face and eye
                 gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
                 # frameBGR = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
-
+                x = y = w = h = 0
                 # Draw the rectangle around each face
                 for (x, y, w, h) in faces:
                     cv2.rectangle(frame, (x, y), (x + w, y + h), (0, 0, 255), 2)
@@ -168,8 +168,10 @@ def stuff():
                     summ += 1
                 elif l_pred == -1:
                     message = "Absent"
+                elif l_pred == 1:
+                    message = "Sleeping"
                 else:
-                    message = "Disengaged"
+                    message = "Yawning"
     return jsonify(result=message)
 
 #app to display the frames
