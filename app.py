@@ -171,7 +171,7 @@ def stuff():
                 elif l_pred == 1:
                     message = "Sleeping"
                 else:
-                    message = "Yawning"
+                    message = "Yawningggg"
     return jsonify(result=message)
 
 #app to display the frames
