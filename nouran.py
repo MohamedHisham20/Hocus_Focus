@@ -133,16 +133,25 @@ class Drowness(nn.Module):
 
 
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-model = Drowness(num_classes)  # num of classes is the num of labels
-model.load_state_dict(torch.load("Model2_stn.pth", map_location=torch.device('cpu')))  # PATH is the path of the model
-model.to(device)
 
-model.eval()
+eye_model = Drowness(num_classes)  # num of classes is the num of labels
+mouth_model = Drowness(num_classes)
+
+eye_model.load_state_dict(
+    torch.load("Model2_stn.pth", map_location=torch.device('cpu')))  # PATH is the path of the model
+mouth_model.load_state_dict(
+    torch.load("Model_mouth_stn.pth", map_location=torch.device('cpu')))  # PATH is the path of the model
+
+eye_model.to(device)
+mouth_model.to(device)
+
+eye_model.eval()
+mouth_model.eval()
 
 
-def predict(image_path):  # image path is the path of the image
+def predict(passed_model, image_path):  # image path is the path of the image
     image = load_image(image_path, transform).to(device)
-    pred_state, stn = model(image)
+    pred_state, stn = passed_model(image)
     pred_probs = torch.nn.functional.softmax(pred_state, dim=1).cpu().detach().numpy()
     predicted_state = np.argmax(pred_probs, axis=1)
     print(predicted_state)
@@ -225,6 +234,14 @@ def index():
 #main function of the video and prediction
 @app.route('/video', methods=['POST'])
 def generate_frames():
+    global pred, last_pred, prediction  # Declare variables globally for persistence across requests
+
+    if not hasattr(generate_frames, 'last_pred'):  # Check if first request
+        last_pred = -1  # Initialize last_pred outside the loop for the first request
+
+    if not hasattr(generate_frames, 'pred'):  # Check if first request
+        pred = -1  # Initialize pred outside the loop for the first request
+
     image_file = request.files.get('image')
     if not image_file:
         return jsonify({"error": "No image found"}), 400
@@ -282,10 +299,22 @@ def generate_frames():
             #
             # plt.show()
             # json_response = json.dumps(predict(cropped_face))
+            eye_state = predict(eye_model, cropped_face)
+            eye_state = eye_state['state']
+            mouth_state = predict(mouth_model, cropped_face)
+            mouth_state = mouth_state['state']
 
-            return jsonify(predict(cropped_face))  # predict the state of the person
+            if eye_state == 0:  #closed eyes
+                pred = 1  #sleep or yawn
+            elif eye_state == 1:  #open eyes
+                if mouth_state == 0:  #open mouth
+                    pred = 2  #yawn open eyes
+                else:  #closed mouth
+                    pred = 0  #active
+            # state_dict = {'eye_state': eye_state, 'mouth_state': mouth_state}
 
-        # else:  # no face detected
+        else:  # no face detected
+            pred = -1
         #     if len(eyes) == 0:  # no eyes detected (absent)
         #         pred = -1
         #     else:  # there's eyes (active)
@@ -294,14 +323,18 @@ def generate_frames():
         # print("last pred", last_pred)
         # print(pred)
 
-        # if pred == 1 or pred == -1 or pred == 2:  #sleep or absent (to eliminate prediction errors)
-        #     if last_pred == pred:  #check that  it repeated twice in a row
-        #         prediction.append(pred)
-        # else:  #any thing other than sleep or absent
-        #     prediction.append(pred)
-        # #update the last prediction
-        # last_pred = pred
-        # print(prediction)
+        # Update prediction history only if necessary
+        if pred == 1 or pred == -1 or pred == 2:  # Update only for sleep/absent states
+            if pred == last_pred:  # Check if the same state is repeated twice
+                prediction.append(pred)
+        else:
+            prediction.append(pred)
+
+        last_pred = pred  # Update last_pred
+        print(f'last_pred: ', {last_pred})
+        print(f'pred:', pred)
+        print(f'prediction:', prediction)
+    return jsonify({"state": pred})
 
 
 #to calculate the average
