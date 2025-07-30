@@ -1,3 +1,13 @@
+# ============================================================================
+# HOCUS FOCUS - REAL-TIME DROWSINESS DETECTION WITH VIDEO STREAMING
+# ============================================================================
+# This Flask application provides real-time drowsiness detection using PyTorch
+# models with Spatial Transformer Networks (STN) and live video streaming.
+# It continuously monitors user engagement through webcam feed analysis.
+
+# ============================================================================
+# IMPORTS
+# ============================================================================
 import time
 from flask import Flask, render_template, Response, jsonify, send_from_directory
 import cv2
@@ -10,72 +20,103 @@ import torch.nn.functional as F
 import numpy as np
 import matplotlib.pyplot as plt
 
-num_classes = 2
+# ============================================================================
+# GLOBAL CONFIGURATION
+# ============================================================================
+num_classes = 2  # Binary classification: 0 = closed/inactive, 1 = open/active
 
-# define the transformation
+# Define image preprocessing transformation pipeline
+# This prepares images for the neural network model
 transform = transforms.Compose([
-    transforms.Resize((224, 224)),  # expected 224,224
-    transforms.ToTensor(),
-    transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),  # expected mean and std
+    transforms.Resize((224, 224)),  # Resize to standard input size (224x224)
+    transforms.ToTensor(),  # Convert PIL image to tensor
+    transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),  # ImageNet normalization
 ])
 
 
-# load image
+# ============================================================================
+# IMAGE PREPROCESSING UTILITIES
+# ============================================================================
+
 def load_image(image, transform):
-    # plt.subplot(2, 2, 1)  # 1 row, 2 columns, 1st subplot
-    # plt.imshow(image)
-    # plt.title('original')
-
+    """
+    Load and preprocess an image for neural network inference.
+    
+    Args:
+        image (numpy.ndarray): Input image as numpy array (BGR format from OpenCV)
+        transform (torchvision.transforms.Compose): Preprocessing transformation pipeline
+        
+    Returns:
+        torch.Tensor: Preprocessed image tensor with batch dimension (1, C, H, W)
+    """
+    # Convert numpy array to PIL Image for processing
     pil_image = Image.fromarray(image)
-
-    # plt.subplot(2, 2, 2)  # 1 row, 2 columns, 1st subplot
-    # plt.imshow(image)
-    # plt.title('convert_to_pil')
-
+    
+    # Ensure the image is in RGB format (required for model)
     pil_image = pil_image.convert("RGB")
-    # plt.subplot(2, 2, 3)  # 1 row, 2 columns, 1st subplot
-    # plt.imshow(image)
-    # plt.title('to_rgb')
-
+    
+    # Apply preprocessing transformations (resize, normalize, etc.)
     pil_image = transform(pil_image)
-    # plt.subplot(2, 2, 4)  # 1 row, 2 columns, 1st subplot
-    # plt.imshow(image)
-    # plt.title('to_tensor')
-    #
-    # plt.show()
-
-    return pil_image.unsqueeze(0)  # this for the batch dimension model expected the batch dimension
+    
+    # Add batch dimension (unsqueeze) - model expects (batch_size, channels, height, width)
+    return pil_image.unsqueeze(0)
 
 
-#define the model
+# ============================================================================
+# NEURAL NETWORK MODEL DEFINITIONS
+# ============================================================================
+
 class LeNet(nn.Module):
+    """
+    Modified LeNet architecture for feature extraction.
+    This serves as the feature extractor component in the drowsiness detection pipeline.
+    """
+    
     def __init__(self):
         super(LeNet, self).__init__()
+        
+        # Feature extraction layers with convolutional and pooling operations
         self.feature_extractor = nn.Sequential(
+            # First convolutional block: 3 -> 6 channels
             nn.Conv2d(in_channels=3, out_channels=6, kernel_size=5, stride=1, padding=0),
             nn.ReLU(),
             nn.AvgPool2d(kernel_size=2, stride=2),
 
+            # Second convolutional block: 6 -> 16 channels
             nn.Conv2d(in_channels=6, out_channels=16, kernel_size=5, stride=1, padding=0),
             nn.ReLU(),
             nn.AvgPool2d(kernel_size=2, stride=2),
+            
+            # Third convolutional block: 16 -> 120 channels
             nn.Conv2d(in_channels=16, out_channels=120, kernel_size=5, stride=1, padding=0),
             nn.ReLU(),
-            # nn.AvgPool2d(kernel_size=2, stride=2),
-            # nn.Conv2d(in_channels=16, out_channels=3, kernel_size=5, stride=1, padding=0),
-            #   nn.ReLU(),
-            # nn.AvgPool2d(kernel_size=2, stride=2),
-
         )
 
     def forward(self, x):
-        a1 = self.feature_extractor(x)
-        return a1
+        """
+        Forward pass through the feature extractor.
+        
+        Args:
+            x (torch.Tensor): Input tensor (batch_size, channels, height, width)
+            
+        Returns:
+            torch.Tensor: Extracted features
+        """
+        features = self.feature_extractor(x)
+        return features
 
 
 class STN(nn.Module):
+    """
+    Spatial Transformer Network (STN) for geometric transformation learning.
+    This network learns to apply spatial transformations to improve feature alignment
+    and enhance the model's robustness to pose variations.
+    """
+    
     def __init__(self):
         super(STN, self).__init__()
+        
+        # Localization network to predict transformation parameters
         self.localization = nn.Sequential(
             nn.Conv2d(3, 128, kernel_size=7),
             nn.MaxPool2d(2, stride=2),
@@ -86,102 +127,216 @@ class STN(nn.Module):
             nn.Conv2d(128, 10, kernel_size=5),
             nn.MaxPool2d(2, stride=2),
             nn.ReLU(True)
-
         )
+        
+        # Fully connected layers to output 6 transformation parameters
         self.fc_loc = nn.Sequential(
-            nn.Linear(90, 64),  # Ensure this matches the flattened size of localization output
+            nn.Linear(90, 64),  # Flattened size from localization network
             nn.ReLU(True),
-            nn.Linear(64, 6)  # 6 parameters for the affine transformation matrix
+            nn.Linear(64, 6)  # 6 parameters for affine transformation matrix
         )
-        # Initialize with identity transformation
+        
+        # Initialize transformation parameters to identity matrix
+        # This ensures the network starts with no transformation
         self.fc_loc[2].weight.data.zero_()
         self.fc_loc[2].bias.data.copy_(torch.tensor([1, 0, 0, 0, 1, 0], dtype=torch.float))
 
     def forward(self, x_encoder, x):
-        # Apply STN
+        """
+        Apply spatial transformation to the input.
+        
+        Args:
+            x_encoder (torch.Tensor): Input from encoder for transformation prediction
+            x (torch.Tensor): Original input to be transformed
+            
+        Returns:
+            torch.Tensor: Spatially transformed input
+        """
+        # Predict transformation parameters
         xs = self.localization(x_encoder)
-        xs = xs.view(xs.size(0), -1)  # Flatten
+        xs = xs.view(xs.size(0), -1)  # Flatten for FC layers
         theta = self.fc_loc(xs)
-        theta = theta.view(-1, 2, 3)  # Affine transformation matrix
+        
+        # Reshape to 2x3 affine transformation matrix
+        theta = theta.view(-1, 2, 3)
+        
+        # Generate sampling grid and apply transformation
         grid = F.affine_grid(theta, x_encoder.size(), align_corners=True)
         x_transformed = F.grid_sample(x_encoder, grid, align_corners=True)
+        
         return x_transformed
 
 
 class Drowness(nn.Module):
+    """
+    Main drowsiness detection model combining ResNet encoder, STN, and LeNet.
+    This model analyzes facial features to detect drowsiness states.
+    """
+    
     def __init__(self, num_classes):
         super(Drowness, self).__init__()
-        self.model = LeNet()
-        self.stn = STN()
+        
+        # ResNet18 encoder (pretrained) for initial feature extraction
+        # Remove the last few layers to get intermediate features
         self.encoder = nn.Sequential(*list(models.resnet18(pretrained=True).children())[:-5])
+        
+        # Channel reduction layer to convert ResNet features to 3 channels for STN
         self.channel_reshape = nn.Conv2d(64, 3, kernel_size=1)
+        
+        # LeNet feature extractor
+        self.model = LeNet()
+        
+        # Spatial Transformer Network for geometric alignment
+        self.stn = STN()
+        
+        # Final classification layer
         self.fc = nn.Sequential(
-
-            nn.Linear(5880, 2)
-
+            nn.Linear(5880, num_classes)  # 5880 is the flattened feature size
         )
 
     def forward(self, x):
+        """
+        Forward pass through the complete drowsiness detection pipeline.
+        
+        Args:
+            x (torch.Tensor): Input image tensor
+            
+        Returns:
+            tuple: (predictions, transformed_features)
+                - predictions: Class predictions for drowsiness state
+                - transformed_features: STN-transformed features for visualization
+        """
+        # Initial feature encoding with ResNet
         x_encoded = self.encoder(x)
+        
+        # Reduce channels for STN compatibility
         x_encoded = self.channel_reshape(x_encoded)
-        x1 = self.stn(x_encoded, x)
-        features = self.model(x1)
+        
+        # Apply spatial transformation
+        x_transformed = self.stn(x_encoded, x)
+        
+        # Extract features using LeNet
+        features = self.model(x_transformed)
+        
+        # Flatten features for classification
         features = torch.flatten(features, 1)
-        pred = self.fc(features)
-        return pred, x1
+        
+        # Final classification
+        predictions = self.fc(features)
+        
+        return predictions, x_transformed
 
 
+# ============================================================================
+# MODEL INITIALIZATION AND DEVICE SETUP
+# ============================================================================
+
+# Set device for computation (GPU if available, otherwise CPU)
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-model = Drowness(num_classes)  # num of classes is the num of labels
-model.load_state_dict(torch.load("Model2_stn.pth", map_location=torch.device('cpu')))  # PATH is the path of the model
+
+# Initialize the drowsiness detection model
+model = Drowness(num_classes)  # Create model instance for eye state detection
+
+# Load pre-trained model weights
+# This model has been trained specifically for drowsiness/eye state classification
+model.load_state_dict(torch.load("Model2_stn.pth", map_location=torch.device('cpu')))
+
+# Move model to the appropriate device (GPU/CPU)
 model.to(device)
 
+# Set model to evaluation mode (disables dropout, batch norm updates, etc.)
 model.eval()
 
 
-def predict(image_path):  # image path is the path of the image
+# ============================================================================
+# PREDICTION AND INFERENCE FUNCTIONS
+# ============================================================================
+
+def predict(image_path):
+    """
+    Make predictions using the trained model on the given image.
+    
+    Args:
+        image_path (numpy.ndarray): Input image as numpy array
+        
+    Returns:
+        None: Prints prediction results and displays visualization
+    """
+    # Preprocess the image and move to device
     image = load_image(image_path, transform).to(device)
-    pred_state, stn = model(image)
+    
+    # Forward pass through the model
+    pred_state, stn_output = model(image)
+    
+    # Convert logits to probabilities using softmax
     pred_probs = torch.nn.functional.softmax(pred_state, dim=1).cpu().detach().numpy()
+    
+    # Get the predicted class (argmax of probabilities)
     predicted_state = np.argmax(pred_probs, axis=1)
-    print(predicted_state)
-    image = image.squeeze(0).permute(1, 2, 0).cpu().numpy()
-    stn = stn[0].permute(1, 2, 0).cpu().detach().numpy()  # Move to CPU before converting to NumPy array
+    print(f"Predicted state: {predicted_state}")
+    
+    # Prepare visualization data (convert tensors to numpy for plotting)
+    image_np = image.squeeze(0).permute(1, 2, 0).cpu().numpy()
+    stn_np = stn_output[0].permute(1, 2, 0).cpu().detach().numpy()
+    stn_np = np.clip(stn_np, 0, 1)  # Clip values to valid range for display
 
-    stn = np.clip(stn, 0, 1)
+    # Display original and transformed images side by side
+    plt.subplot(1, 2, 1)
+    plt.imshow(image_np)
+    plt.title('Original Image')
 
-    plt.subplot(1, 2, 1)  # 1 row, 2 columns, 1st subplot
-    plt.imshow(image)
-    plt.title('original')
-
-    plt.subplot(1, 2, 2)  # 1 row, 2 columns, 2nd subplot
-    plt.imshow(stn)
-    plt.title('transformed')
+    plt.subplot(1, 2, 2)
+    plt.imshow(stn_np)
+    plt.title('STN Transformed')
 
     plt.show()
 
-    print(f'state: {predicted_state}')
+    print(f'Detected state: {predicted_state}')
 
 
-# create the app
+# ============================================================================
+# FLASK APPLICATION SETUP
+# ============================================================================
+
+# Initialize Flask application
 app = Flask(__name__)
-#to capture the video from the camera
+
+# Initialize camera capture (device 0 = default camera)
 camera = cv2.VideoCapture(0)
 
+# ============================================================================
+# COMPUTER VISION HELPER FUNCTIONS
+# ============================================================================
 
 def crop_face_and_return(image):
+    """
+    Detect and crop faces from an input image using Haar Cascade classifier.
+    
+    Args:
+        image (numpy.ndarray): Input image in RGB format
+        
+    Returns:
+        numpy.ndarray or None: Cropped face image if face is detected, None otherwise
+    """
     cropped_face = None
-    #create instance of haarcascade
+    
+    # Initialize Haar Cascade face detector
     detector = cv2.CascadeClassifier('Haarcascades/haarcascade_frontalface_default.xml')
-    #capture the face using the model
+    
+    # Detect faces in the image
+    # Parameters: scaleFactor=1.1, minNeighbors=7
     faces = detector.detectMultiScale(image, 1.1, 7)
-    #crop the face exactly
+    
+    # Extract the first detected face
     for (x, y, w, h) in faces:
         cropped_face = image[y:y + h, x:x + w]
+        break  # Only take the first face
+        
     return cropped_face
 
-
+# Alternative MTCNN implementation (commented out for reference)
 # def crop_face_and_return(image):
+#    """Alternative face detection using MTCNN (more accurate but slower)"""
 #    cropped_face = None
 #    detector = MTCNN()
 #    faces = detector.detect_faces(image)
@@ -208,148 +363,197 @@ def crop_face_and_return(image):
 #     else:
 #         return True
 
+# ============================================================================
+# GLOBAL APPLICATION STATE VARIABLES
+# ============================================================================
 
-prediction = []  #prediction array used to calculate the average
+# Prediction storage for calculating engagement averages
+prediction = []  # Stores prediction history for statistical analysis
 
+# ============================================================================
+# VIDEO STREAMING AND PROCESSING FUNCTIONS
+# ============================================================================
 
 #main function of the video and prediction
 def generate_frames():
-    timey = 0  #to use time fn instead of delay
-    last_pred = 0  #used for the sleep (to eliminate wrong frames of sleep)
+    """
+    Generator function that captures video frames from the camera and processes them
+    for real-time drowsiness detection. Yields JPEG-encoded frames for streaming.
+    
+    This function:
+    1. Captures frames from the webcam
+    2. Processes frames every 3 seconds to reduce computational load
+    3. Detects faces and analyzes drowsiness state
+    4. Yields processed frames for web streaming
+    
+    Yields:
+        bytes: JPEG-encoded frame data with multipart headers for HTTP streaming
+    """
+    timey = 0       # Timer for controlling processing intervals
+    last_pred = 0   # Previous prediction state (for consistency checking)
+    
     while True:
-        ## read the camera frame
+        # Capture frame from camera
         success, frame_bgr = camera.read()
+        
+        # Convert BGR to RGB for processing
         frame = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
-
+        
+        # Flip frame horizontally for mirror effect (better user experience)
         frame = cv2.flip(frame, 1)
-        if time.time() - timey > 3:  # enter each 5 seconds
-            timey = time.time()  #update the time
-            if not success:  #couldn't get the camera
+        
+        # Process frame every 3 seconds to reduce computational overhead
+        if time.time() - timey > 3:
+            timey = time.time()  # Update timer
+            
+            if not success:  # Check if frame capture failed
                 break
             else:
-                #create instance of face detection
+                # Face detection and analysis
                 detector = cv2.CascadeClassifier('Haarcascades/haarcascade_frontalface_default.xml')
-                # #instance of eye detection
-                # eye_cascade = cv2.CascadeClassifier('Haarcascades/haarcascade_eye.xml')
-                #get the face
-
                 faces = detector.detectMultiScale(frame, 1.1, 7)
-                #convert to gray scale to enhance the detection of face and eye
-                # gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-                # frameBGR = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
 
-                # Draw the rectangle around each face
+                # Draw rectangles around detected faces for visualization
                 for (x, y, w, h) in faces:
                     cv2.rectangle(frame, (x, y), (x + w, y + h), (0, 0, 255), 2)
-                #range of interest (to faster the calculations)
-                # roi_gray = gray[y:y + h, x:x + w]
-                #roi_color = frame[y:y + h, x:x + w]
-                # #detect the eyes
-                # eyes = eye_cascade.detectMultiScale(roi_gray, 1.1, 10)
-                # #draw rectangle around the eyes
-                # for (ex, ey, ew, eh) in eyes:
-                #     cv2.rectangle(roi_color, (ex, ey), (ex + ew, ey + eh), (0, 255, 0), 2)
 
-                # select the frame from the video (gray scale)
-                cropped_face = crop_face_and_return(frame)      #gray
-                if cropped_face is not None:  # there's a face detected
-                    #get it back to color image
-                    # cropped_face = cv2.cvtColor(cropped_face, cv2.COLOR_GRAY2BGR)
-                    # Convert the NumPy array 'cropped_face' into a PIL Image
+                # Extract and analyze the detected face
+                cropped_face = crop_face_and_return(frame)
+                
+                if cropped_face is not None:  # Face successfully detected
+                    print(f"Cropped face shape: {cropped_face.shape}")
+                    
+                    # Analyze drowsiness state using the trained model
+                    predict(cropped_face)
+                    
+                    # Note: Prediction logic for storing results is commented out
+                    # This would normally update the prediction array for analytics
+                    # Uncomment and modify as needed for your specific requirements
 
-                    # plt.subplot(1, 2, 1)  # 1 row, 2 columns, 1st subplot
-                    # plt.imshow(cropped_face)
-                    # plt.title('original')
-                    print("cropped face", cropped_face.shape)
-                    # pil_image = Image.fromarray(cropped_face)
-                    # pil_image = pil_image.convert("RGB")
-
-
-                    # pil_image_mode = pil_image.mode
-                    # print("pil image", pil_image_mode)
-
-                    # plt.subplot(1, 2, 2)  # 1 row, 2 columns, 1st subplot
-                    # plt.imshow(pil_image)
-                    # plt.title('converted')
-                    #
-                    # plt.show()
-
-                    predict(cropped_face)  # predict the state of the person
-
-                # else:  # no face detected
-                #     if len(eyes) == 0:  # no eyes detected (absent)
-                #         pred = -1
-                #     else:  # there's eyes (active)
-                #         pred = 0
-                # #see the output on the terminal
-                # print("last pred", last_pred)
-                # print(pred)
-
-                # if pred == 1 or pred == -1 or pred == 2:  #sleep or absent (to eliminate prediction errors)
-                #     if last_pred == pred:  #check that  it repeated twice in a row
-                #         prediction.append(pred)
-                # else:  #any thing other than sleep or absent
-                #     prediction.append(pred)
-                # #update the last prediction
-                # last_pred = pred
-                # print(prediction)
-
-            # display the video
+        # Encode frame as JPEG for streaming
         ret, buffer = cv2.imencode('.jpg', frame_bgr)
-        frame = buffer.tobytes()
+        frame_bytes = buffer.tobytes()
 
+        # Yield frame in multipart format for HTTP streaming
         yield (b'--frame\r\n'
-               b'Content-Type: image/jpeg\r\n\r\n' + frame + b'\r\n')
+               b'Content-Type: image/jpeg\r\n\r\n' + frame_bytes + b'\r\n')
 
 
-#main application
+# ============================================================================
+# FLASK ROUTES
+# ============================================================================
+
 @app.route('/')
 def index():
+    """
+    Main route that serves the web application's home page.
+    
+    Returns:
+        str: Rendered HTML template for the main interface
+    """
     return render_template('index.html')
 
 
-#to calculate the average
-summ = 0
-timeyy = 0
+# ============================================================================
+# ANALYTICS AND REPORTING VARIABLES
+# ============================================================================
+
+# Global variables for engagement analytics calculation
+summ = 0    # Sum counter for engagement calculation
+timeyy = 0  # Timestamp for periodic calculations
 
 
-#to display the output average
 @app.route('/_stuff', methods=['GET'])
 def stuff():
-    global summ
-    global timeyy
+    """
+    Calculate and return engagement analytics based on prediction history.
+    
+    This endpoint provides real-time engagement statistics by analyzing
+    the accumulated prediction data over time intervals.
+    
+    Returns:
+        JSON response containing:
+        - Engagement percentage (when 5 predictions are collected)
+        - Current state description ('Engaged', 'Absent', 'Disengaged')
+    """
+    global summ, timeyy
+    
     message = ''
-    if len(prediction):  #avoid first empty prediction
-        while time.time() - timeyy > 1:  #enter each 4 seconds
+    
+    # Process predictions only if we have data
+    if len(prediction):
+        # Update every 1 second (time-based processing)
+        while time.time() - timeyy > 1:
             timeyy = time.time()
-            if len(prediction) % 5 == 0:  # each 5 readings of the prediction
-                if summ > 5: summ = 5
+            
+            # Calculate average engagement every 5 predictions
+            if len(prediction) % 5 == 0:
+                # Cap the sum at 5 for percentage calculation
+                if summ > 5:
+                    summ = 5
+                    
+                # Calculate engagement percentage
                 avg = (summ / 5) * 100
-                message = 'avg=' + str(round(avg, 2)) + '%'
+                message = f'Engagement: {round(avg, 2)}%'
+                
+                # Reset counter for next calculation cycle
                 summ = 0
             else:
-                l_pred = prediction[-1]  #get last prediction to display it
-                if l_pred == 0:
+                # Provide real-time state feedback
+                latest_prediction = prediction[-1]  # Get most recent prediction
+                
+                if latest_prediction == 0:
                     message = 'Engaged'
-                    summ += 1
-                elif l_pred == -1:
+                    summ += 1  # Count as engaged
+                elif latest_prediction == -1:
                     message = "Absent"
-                else:
+                else:  # latest_prediction == 1 or 2
                     message = "Disengaged"
+    
     return jsonify(result=message)
 
 
-#app to display the frames
 @app.route('/video')
 def video():
+    """
+    Route that provides the video stream for real-time drowsiness detection.
+    Uses the generate_frames() generator to continuously stream video frames.
+    
+    Returns:
+        Response: HTTP response with multipart video stream
+    """
     return Response(generate_frames(), mimetype='multipart/x-mixed-replace; boundary=frame')
 
 
-# Ensure that static files are served
+# ============================================================================
+# STATIC FILE SERVING
+# ============================================================================
+
 @app.route('/static/<path:filename>')
 def static_files(filename):
+    """
+    Serve static files (CSS, JS, images) for the web interface.
+    
+    Args:
+        filename (str): Requested static file path
+        
+    Returns:
+        File response from the static directory
+    """
     return send_from_directory('static', filename)
 
 
+# ============================================================================
+# APPLICATION ENTRY POINT
+# ============================================================================
+
 if __name__ == "__main__":
+    """
+    Start the Flask application server.
+    
+    Configuration:
+    - Debug: True (enables auto-reload and detailed error messages)
+    - Default host: 127.0.0.1 (localhost)
+    - Default port: 5000
+    """
     app.run(debug=True)

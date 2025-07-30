@@ -1,3 +1,14 @@
+# ============================================================================
+# HOCUS FOCUS - ADVANCED DROWSINESS DETECTION WITH SPATIAL TRANSFORMER NETWORKS
+# ============================================================================
+# This Flask application provides real-time drowsiness detection using PyTorch
+# models with Spatial Transformer Networks (STN) for enhanced accuracy.
+# It analyzes both eye and mouth states to determine engagement levels.
+# It is used as backend for the mobile app
+
+# ============================================================================
+# IMPORTS
+# ============================================================================
 import json
 import time
 from flask import Flask, render_template, Response, jsonify, send_from_directory, request
@@ -11,72 +22,103 @@ import torch.nn.functional as F
 import numpy as np
 import matplotlib.pyplot as plt
 
-num_classes = 2
+# ============================================================================
+# GLOBAL CONFIGURATION
+# ============================================================================
+num_classes = 2  # Binary classification: 0 = closed/inactive, 1 = open/active
 
-# define the transformation
+# Define image preprocessing transformation pipeline
+# This prepares images for the neural network models
 transform = transforms.Compose([
-    transforms.Resize((224, 224)),  # expected 224,224
-    transforms.ToTensor(),
-    transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),  # expected mean and std
+    transforms.Resize((224, 224)),  # Resize to standard input size (224x224)
+    transforms.ToTensor(),  # Convert PIL image to tensor
+    transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),  # ImageNet normalization
 ])
 
 
-# load image
+# ============================================================================
+# IMAGE PREPROCESSING UTILITIES
+# ============================================================================
+
 def load_image(image, transform):
-    # plt.subplot(2, 2, 1)  # 1 row, 2 columns, 1st subplot
-    # plt.imshow(image)
-    # plt.title('original')
-
+    """
+    Load and preprocess an image for neural network inference.
+    
+    Args:
+        image (numpy.ndarray): Input image as numpy array (BGR format from OpenCV)
+        transform (torchvision.transforms.Compose): Preprocessing transformation pipeline
+        
+    Returns:
+        torch.Tensor: Preprocessed image tensor with batch dimension (1, C, H, W)
+    """
+    # Convert numpy array to PIL Image for processing
     pil_image = Image.fromarray(image)
-
-    # plt.subplot(2, 2, 2)  # 1 row, 2 columns, 1st subplot
-    # plt.imshow(image)
-    # plt.title('convert_to_pil')
-
+    
+    # Ensure the image is in RGB format (required for model)
     pil_image = pil_image.convert("RGB")
-    # plt.subplot(2, 2, 3)  # 1 row, 2 columns, 1st subplot
-    # plt.imshow(image)
-    # plt.title('to_rgb')
-
+    
+    # Apply preprocessing transformations (resize, normalize, etc.)
     pil_image = transform(pil_image)
-    # plt.subplot(2, 2, 4)  # 1 row, 2 columns, 1st subplot
-    # plt.imshow(image)
-    # plt.title('to_tensor')
-    #
-    # plt.show()
-
-    return pil_image.unsqueeze(0)  # this for the batch dimension model expected the batch dimension
+    
+    # Add batch dimension (unsqueeze) - model expects (batch_size, channels, height, width)
+    return pil_image.unsqueeze(0)
 
 
-#define the model
+# ============================================================================
+# NEURAL NETWORK MODEL DEFINITIONS
+# ============================================================================
+
 class LeNet(nn.Module):
+    """
+    Modified LeNet architecture for feature extraction.
+    This serves as the feature extractor component in the drowsiness detection pipeline.
+    """
+    
     def __init__(self):
         super(LeNet, self).__init__()
+        
+        # Feature extraction layers with convolutional and pooling operations
         self.feature_extractor = nn.Sequential(
+            # First convolutional block: 3 -> 6 channels
             nn.Conv2d(in_channels=3, out_channels=6, kernel_size=5, stride=1, padding=0),
             nn.ReLU(),
             nn.AvgPool2d(kernel_size=2, stride=2),
 
+            # Second convolutional block: 6 -> 16 channels
             nn.Conv2d(in_channels=6, out_channels=16, kernel_size=5, stride=1, padding=0),
             nn.ReLU(),
             nn.AvgPool2d(kernel_size=2, stride=2),
+            
+            # Third convolutional block: 16 -> 120 channels
             nn.Conv2d(in_channels=16, out_channels=120, kernel_size=5, stride=1, padding=0),
             nn.ReLU(),
-            # nn.AvgPool2d(kernel_size=2, stride=2),
-            # nn.Conv2d(in_channels=16, out_channels=3, kernel_size=5, stride=1, padding=0),
-            #   nn.ReLU(),
-            # nn.AvgPool2d(kernel_size=2, stride=2),
-
         )
 
     def forward(self, x):
-        a1 = self.feature_extractor(x)
-        return a1
+        """
+        Forward pass through the feature extractor.
+        
+        Args:
+            x (torch.Tensor): Input tensor (batch_size, channels, height, width)
+            
+        Returns:
+            torch.Tensor: Extracted features
+        """
+        features = self.feature_extractor(x)
+        return features
 
 
 class STN(nn.Module):
+    """
+    Spatial Transformer Network (STN) for geometric transformation learning.
+    This network learns to apply spatial transformations to improve feature alignment
+    and enhance the model's robustness to pose variations.
+    """
+    
     def __init__(self):
         super(STN, self).__init__()
+        
+        # Localization network to predict transformation parameters
         self.localization = nn.Sequential(
             nn.Conv2d(3, 128, kernel_size=7),
             nn.MaxPool2d(2, stride=2),
@@ -87,110 +129,215 @@ class STN(nn.Module):
             nn.Conv2d(128, 10, kernel_size=5),
             nn.MaxPool2d(2, stride=2),
             nn.ReLU(True)
-
         )
+        
+        # Fully connected layers to output 6 transformation parameters
         self.fc_loc = nn.Sequential(
-            nn.Linear(90, 64),  # Ensure this matches the flattened size of localization output
+            nn.Linear(90, 64),  # Flattened size from localization network
             nn.ReLU(True),
-            nn.Linear(64, 6)  # 6 parameters for the affine transformation matrix
+            nn.Linear(64, 6)  # 6 parameters for affine transformation matrix
         )
-        # Initialize with identity transformation
+        
+        # Initialize transformation parameters to identity matrix
+        # This ensures the network starts with no transformation
         self.fc_loc[2].weight.data.zero_()
         self.fc_loc[2].bias.data.copy_(torch.tensor([1, 0, 0, 0, 1, 0], dtype=torch.float))
 
     def forward(self, x_encoder, x):
-        # Apply STN
+        """
+        Apply spatial transformation to the input.
+        
+        Args:
+            x_encoder (torch.Tensor): Input from encoder for transformation prediction
+            x (torch.Tensor): Original input to be transformed
+            
+        Returns:
+            torch.Tensor: Spatially transformed input
+        """
+        # Predict transformation parameters
         xs = self.localization(x_encoder)
-        xs = xs.view(xs.size(0), -1)  # Flatten
+        xs = xs.view(xs.size(0), -1)  # Flatten for FC layers
         theta = self.fc_loc(xs)
-        theta = theta.view(-1, 2, 3)  # Affine transformation matrix
+        
+        # Reshape to 2x3 affine transformation matrix
+        theta = theta.view(-1, 2, 3)
+        
+        # Generate sampling grid and apply transformation
         grid = F.affine_grid(theta, x_encoder.size(), align_corners=True)
         x_transformed = F.grid_sample(x_encoder, grid, align_corners=True)
+        
         return x_transformed
 
 
 class Drowness(nn.Module):
+    """
+    Main drowsiness detection model combining ResNet encoder, STN, and LeNet.
+    This model analyzes facial features to detect drowsiness states.
+    """
+    
     def __init__(self, num_classes):
         super(Drowness, self).__init__()
-        self.model = LeNet()
-        self.stn = STN()
+        
+        # ResNet18 encoder (pretrained) for initial feature extraction
+        # Remove the last few layers to get intermediate features
         self.encoder = nn.Sequential(*list(models.resnet18(pretrained=True).children())[:-5])
+        
+        # Channel reduction layer to convert ResNet features to 3 channels for STN
         self.channel_reshape = nn.Conv2d(64, 3, kernel_size=1)
+        
+        # LeNet feature extractor
+        self.model = LeNet()
+        
+        # Spatial Transformer Network for geometric alignment
+        self.stn = STN()
+        
+        # Final classification layer
         self.fc = nn.Sequential(
-
-            nn.Linear(5880, 2)
-
+            nn.Linear(5880, num_classes)  # 5880 is the flattened feature size
         )
 
     def forward(self, x):
+        """
+        Forward pass through the complete drowsiness detection pipeline.
+        
+        Args:
+            x (torch.Tensor): Input image tensor
+            
+        Returns:
+            tuple: (predictions, transformed_features)
+                - predictions: Class predictions for drowsiness state
+                - transformed_features: STN-transformed features for visualization
+        """
+        # Initial feature encoding with ResNet
         x_encoded = self.encoder(x)
+        
+        # Reduce channels for STN compatibility
         x_encoded = self.channel_reshape(x_encoded)
-        x1 = self.stn(x_encoded, x)
-        features = self.model(x1)
+        
+        # Apply spatial transformation
+        x_transformed = self.stn(x_encoded, x)
+        
+        # Extract features using LeNet
+        features = self.model(x_transformed)
+        
+        # Flatten features for classification
         features = torch.flatten(features, 1)
-        pred = self.fc(features)
-        return pred, x1
+        
+        # Final classification
+        predictions = self.fc(features)
+        
+        return predictions, x_transformed
 
 
+# ============================================================================
+# MODEL INITIALIZATION AND DEVICE SETUP
+# ============================================================================
+
+# Set device for computation (GPU if available, otherwise CPU)
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
-eye_model = Drowness(num_classes)  # num of classes is the num of labels
-mouth_model = Drowness(num_classes)
+# Initialize separate models for eye and mouth state detection
+eye_model = Drowness(num_classes)    # Model for detecting eye states (open/closed)
+mouth_model = Drowness(num_classes)  # Model for detecting mouth states (open/closed)
 
+# Load pre-trained model weights
+# These models have been trained specifically for eye and mouth state classification
 eye_model.load_state_dict(
-    torch.load("Model2_stn.pth", map_location=torch.device('cpu')))  # PATH is the path of the model
+    torch.load("Model2_stn.pth", map_location=torch.device('cpu'))
+)
 mouth_model.load_state_dict(
-    torch.load("Model_mouth_stn.pth", map_location=torch.device('cpu')))  # PATH is the path of the model
+    torch.load("Model_mouth_stn.pth", map_location=torch.device('cpu'))
+)
 
+# Move models to the appropriate device (GPU/CPU)
 eye_model.to(device)
 mouth_model.to(device)
 
+# Set models to evaluation mode (disables dropout, batch norm updates, etc.)
 eye_model.eval()
 mouth_model.eval()
 
 
-def predict(passed_model, image_path):  # image path is the path of the image
+# ============================================================================
+# PREDICTION AND INFERENCE FUNCTIONS
+# ============================================================================
+
+def predict(passed_model, image_path):
+    """
+    Make predictions using the specified model on the given image.
+    
+    Args:
+        passed_model (torch.nn.Module): The neural network model (eye_model or mouth_model)
+        image_path (numpy.ndarray): Input image as numpy array
+        
+    Returns:
+        dict: Dictionary containing the predicted state (0 or 1)
+              0 = closed/inactive, 1 = open/active
+    """
+    # Preprocess the image and move to device
     image = load_image(image_path, transform).to(device)
-    pred_state, stn = passed_model(image)
+    
+    # Forward pass through the model
+    pred_state, stn_output = passed_model(image)
+    
+    # Convert logits to probabilities using softmax
     pred_probs = torch.nn.functional.softmax(pred_state, dim=1).cpu().detach().numpy()
+    
+    # Get the predicted class (argmax of probabilities)
     predicted_state = np.argmax(pred_probs, axis=1)
-    print(predicted_state)
-    #convert predicted state from np array to int
+    print(f"Predicted state: {predicted_state}")
+    
+    # Convert numpy array to integer for JSON serialization
     predicted_state = int(predicted_state[0])
-    image = image.squeeze(0).permute(1, 2, 0).cpu().numpy()
-    stn = stn[0].permute(1, 2, 0).cpu().detach().numpy()  # Move to CPU before converting to NumPy array
+    
+    # Prepare visualization data (convert tensors to numpy for plotting)
+    image_np = image.squeeze(0).permute(1, 2, 0).cpu().numpy()
+    stn_np = stn_output[0].permute(1, 2, 0).cpu().detach().numpy()
+    stn_np = np.clip(stn_np, 0, 1)  # Clip values to valid range for display
 
-    stn = np.clip(stn, 0, 1)
+    # Optional: Display original and transformed images side by side
+    plt.subplot(1, 2, 1)
+    plt.imshow(image_np)
+    plt.title('Original Image')
 
-    plt.subplot(1, 2, 1)  # 1 row, 2 columns, 1st subplot
-    plt.imshow(image)
-    plt.title('original')
-
-    plt.subplot(1, 2, 2)  # 1 row, 2 columns, 2nd subplot
-    plt.imshow(stn)
-    plt.title('transformed')
+    plt.subplot(1, 2, 2)
+    plt.imshow(stn_np)
+    plt.title('STN Transformed')
 
     plt.show()
 
-    print({'state': predicted_state})
+    print(f"Prediction result: {{'state': {predicted_state}}}")
     return {'state': predicted_state}
 
 
-# create the app with port 3000
-app = Flask(__name__)
-#to capture the video from the camera
-camera = cv2.VideoCapture(0)
-
+# ============================================================================
+# COMPUTER VISION HELPER FUNCTIONS
+# ============================================================================
 
 def crop_face_and_return(image):
+    """
+    Detect and crop faces from an input image using Haar Cascade classifier.
+    
+    Args:
+        image (numpy.ndarray): Input image in BGR format
+        
+    Returns:
+        numpy.ndarray or None: Cropped face image if face is detected, None otherwise
+    """
     cropped_face = None
-    #create instance of haarcascade
+    
+    # Initialize Haar Cascade face detector
     detector = cv2.CascadeClassifier('Haarcascades/haarcascade_frontalface_default.xml')
-    #capture the face using the model
+    
+    # Detect faces in the image
+    # Parameters: scaleFactor=1.1, minNeighbors=7
     faces = detector.detectMultiScale(image, 1.1, 7)
-    #crop the face exactly
+    
+    # Extract the first detected face
     for (x, y, w, h) in faces:
         cropped_face = image[y:y + h, x:x + w]
+        break  # Only take the first face
+        
     return cropped_face
 
 
@@ -228,151 +375,196 @@ prediction = []  #prediction array used to calculate the average
 #main application
 @app.route('/')
 def index():
+    """
+    Simple root route for basic application health check.
+    
+    Returns:
+        str: Welcome message
+    """
     return "Hello, World!"
 
 
-#main function of the video and prediction
 @app.route('/video', methods=['POST'])
 def generate_frames():
-    global pred, last_pred, prediction  # Declare variables globally for persistence across requests
+    """
+    Main video processing endpoint that analyzes uploaded images for drowsiness detection.
+    
+    This function:
+    1. Receives an image via POST request
+    2. Detects faces in the image
+    3. Analyzes eye and mouth states using neural networks
+    4. Determines overall engagement state
+    5. Updates prediction history
+    
+    Returns:
+        JSON response with current state:
+        - 0: Active/Engaged
+        - 1: Sleepy/Drowsy (closed eyes)
+        - 2: Yawning (open eyes, open mouth)
+        - -1: Absent (no face detected)
+    """
+    global pred, last_pred, prediction  # Use global variables for state persistence
 
-    if not hasattr(generate_frames, 'last_pred'):  # Check if first request
-        last_pred = -1  # Initialize last_pred outside the loop for the first request
+    # Initialize persistent variables on first request
+    if not hasattr(generate_frames, 'last_pred'):
+        last_pred = -1  # Previous prediction state
+    if not hasattr(generate_frames, 'pred'):
+        pred = -1  # Current prediction state
 
-    if not hasattr(generate_frames, 'pred'):  # Check if first request
-        pred = -1  # Initialize pred outside the loop for the first request
-
+    # Validate image upload
     image_file = request.files.get('image')
     if not image_file:
         return jsonify({"error": "No image found"}), 400
-    else:
-        # Read the image file and convert it to a numpy array
+    
+    # Process uploaded image
+    try:
+        # Convert uploaded file to numpy array
         image_data = np.frombuffer(image_file.read(), np.uint8)
-        # Decode the numpy array to an image
         image = cv2.imdecode(image_data, cv2.IMREAD_COLOR)
+        
         if image is None:
             return jsonify({"error": "Failed to decode image"}), 400
 
+        # Convert BGR to RGB for processing
         frame = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
 
-        #create instance of face detection
+        # Face detection using Haar Cascade
         detector = cv2.CascadeClassifier('Haarcascades/haarcascade_frontalface_default.xml')
-        #get the face
-
         faces = detector.detectMultiScale(frame, 1.1, 7)
-        #convert to gray scale to enhance the detection of face and eye
-        # gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        # frameBGR = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
 
-        # Draw the rectangle around each face
+        # Draw rectangles around detected faces (for debugging/visualization)
         for (x, y, w, h) in faces:
             cv2.rectangle(frame, (x, y), (x + w, y + h), (0, 0, 255), 2)
-        #range of interest (to faster the calculations)
-        # roi_gray = gray[y:y + h, x:x + w]
-        #roi_color = frame[y:y + h, x:x + w]
-        # #detect the eyes
-        # eyes = eye_cascade.detectMultiScale(roi_gray, 1.1, 10)
-        # #draw rectangle around the eyes
-        # for (ex, ey, ew, eh) in eyes:
-        #     cv2.rectangle(roi_color, (ex, ey), (ex + ew, ey + eh), (0, 255, 0), 2)
 
-        # select the frame from the video (gray scale)
-        cropped_face = crop_face_and_return(frame)  #gray
-        if cropped_face is not None:  # there's a face detected
-            #get it back to color image
-            # cropped_face = cv2.cvtColor(cropped_face, cv2.COLOR_GRAY2BGR)
-            # Convert the NumPy array 'cropped_face' into a PIL Image
+        # Extract and analyze the face
+        cropped_face = crop_face_and_return(frame)
+        
+        if cropped_face is not None:  # Face successfully detected
+            # Analyze eye state (0=closed, 1=open)
+            eye_state_result = predict(eye_model, cropped_face)
+            eye_state = eye_state_result['state']
+            
+            # Analyze mouth state (0=closed, 1=open)
+            mouth_state_result = predict(mouth_model, cropped_face)
+            mouth_state = mouth_state_result['state']
 
-            # plt.subplot(1, 2, 1)  # 1 row, 2 columns, 1st subplot
-            # plt.imshow(cropped_face)
-            # plt.title('original')
-            # print("cropped face", cropped_face.shape)
-            # pil_image = Image.fromarray(cropped_face)
-            # pil_image = pil_image.convert("RGB")
+            # Determine overall engagement state based on eye and mouth analysis
+            if eye_state == 0:  # Eyes closed
+                pred = 1  # Sleepy/Drowsy state
+            elif eye_state == 1:  # Eyes open
+                if mouth_state == 0:  # Mouth closed
+                    pred = 0  # Active/Engaged
+                else:  # Mouth open
+                    pred = 2  # Yawning state
+        else:  # No face detected
+            pred = -1  # Absent state
 
-            # pil_image_mode = pil_image.mode
-            # print("pil image", pil_image_mode)
-
-            # plt.subplot(1, 2, 2)  # 1 row, 2 columns, 1st subplot
-            # plt.imshow(pil_image)
-            # plt.title('converted')
-            #
-            # plt.show()
-            # json_response = json.dumps(predict(cropped_face))
-            eye_state = predict(eye_model, cropped_face)
-            eye_state = eye_state['state']
-            mouth_state = predict(mouth_model, cropped_face)
-            mouth_state = mouth_state['state']
-
-            if eye_state == 0:  #closed eyes
-                pred = 1  #sleep or yawn
-            elif eye_state == 1:  #open eyes
-                if mouth_state == 0:  #open mouth
-                    pred = 2  #yawn open eyes
-                else:  #closed mouth
-                    pred = 0  #active
-            # state_dict = {'eye_state': eye_state, 'mouth_state': mouth_state}
-
-        else:  # no face detected
-            pred = -1
-        #     if len(eyes) == 0:  # no eyes detected (absent)
-        #         pred = -1
-        #     else:  # there's eyes (active)
-        #         pred = 0
-        # #see the output on the terminal
-        # print("last pred", last_pred)
-        # print(pred)
-
-        # Update prediction history only if necessary
-        if pred == 1 or pred == -1 or pred == 2:  # Update only for sleep/absent states
-            if pred == last_pred:  # Check if the same state is repeated twice
+        # Update prediction history for statistical analysis
+        # Only update history for significant state changes or consistent states
+        if pred == 1 or pred == -1 or pred == 2:  # Sleep/Absent/Yawn states
+            if pred == last_pred:  # Consistent state detection
                 prediction.append(pred)
-        else:
+        else:  # Active state
             prediction.append(pred)
 
-        last_pred = pred  # Update last_pred
-        print(f'last_pred: ', {last_pred})
-        print(f'pred:', pred)
-        print(f'prediction:', prediction)
+        # Update state tracking
+        last_pred = pred
+        
+        # Debug logging
+        print(f'Last prediction: {last_pred}')
+        print(f'Current prediction: {pred}')
+        print(f'Prediction history: {prediction}')
+        
+    except Exception as e:
+        print(f"Error processing image: {e}")
+        return jsonify({"error": "Image processing failed"}), 500
+
     return jsonify({"state": pred})
 
 
-#to calculate the average
-summ = 0
-timeyy = 0
+# ============================================================================
+# ANALYTICS AND REPORTING ROUTES
+# ============================================================================
 
-
-#to display the output average
 @app.route('/_stuff', methods=['GET'])
 def stuff():
-    global summ
-    global timeyy
+    """
+    Calculate and return engagement analytics based on prediction history.
+    
+    This endpoint provides real-time engagement statistics by analyzing
+    the accumulated prediction data over time intervals.
+    
+    Returns:
+        JSON response containing:
+        - Engagement percentage (when 5 predictions are collected)
+        - Current state description ('Engaged', 'Absent', 'Disengaged')
+    """
+    global summ, timeyy
+    
     message = ''
-    if len(prediction):  #avoid first empty prediction
-        while time.time() - timeyy > 1:  #enter each 4 seconds
+    
+    # Process predictions only if we have data
+    if len(prediction):
+        # Update every 1 second (time-based processing)
+        while time.time() - timeyy > 1:
             timeyy = time.time()
-            if len(prediction) % 5 == 0:  # each 5 readings of the prediction
-                if summ > 5: summ = 5
+            
+            # Calculate average engagement every 5 predictions
+            if len(prediction) % 5 == 0:
+                # Cap the sum at 5 for percentage calculation
+                if summ > 5:
+                    summ = 5
+                    
+                # Calculate engagement percentage
                 avg = (summ / 5) * 100
-                message = 'avg=' + str(round(avg, 2)) + '%'
+                message = f'Engagement: {round(avg, 2)}%'
+                
+                # Reset counter for next calculation cycle
                 summ = 0
             else:
-                l_pred = prediction[-1]  #get last prediction to display it
-                if l_pred == 0:
+                # Provide real-time state feedback
+                latest_prediction = prediction[-1]  # Get most recent prediction
+                
+                if latest_prediction == 0:
                     message = 'Engaged'
-                    summ += 1
-                elif l_pred == -1:
+                    summ += 1  # Count as engaged
+                elif latest_prediction == -1:
                     message = "Absent"
-                else:
+                else:  # latest_prediction == 1 or 2
                     message = "Disengaged"
+    
     return jsonify(result=message)
 
 
-# Ensure that static files are served
+# ============================================================================
+# STATIC FILE SERVING
+# ============================================================================
+
 @app.route('/static/<path:filename>')
 def static_files(filename):
+    """
+    Serve static files (CSS, JS, images) for the web interface.
+    
+    Args:
+        filename (str): Requested static file path
+        
+    Returns:
+        File response from the static directory
+    """
     return send_from_directory('static', filename)
 
 
+# ============================================================================
+# APPLICATION ENTRY POINT
+# ============================================================================
+
 if __name__ == "__main__":
+    """
+    Start the Flask application server.
+    
+    Configuration:
+    - Host: 0.0.0.0 (accessible from any network interface)
+    - Port: 8080
+    - Debug: True (enables auto-reload and detailed error messages)
+    """
     app.run(host='0.0.0.0', port=8080, debug=True)
