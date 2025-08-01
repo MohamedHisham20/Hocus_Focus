@@ -20,7 +20,11 @@ from PIL import Image
 import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
-import matplotlib.pyplot as plt
+
+# ============================================================================
+# FLASK APPLICATION SETUP
+# ============================================================================
+app = Flask(__name__)
 
 # ============================================================================
 # GLOBAL CONFIGURATION
@@ -180,7 +184,7 @@ class Drowness(nn.Module):
         
         # ResNet18 encoder (pretrained) for initial feature extraction
         # Remove the last few layers to get intermediate features
-        self.encoder = nn.Sequential(*list(models.resnet18(pretrained=True).children())[:-5])
+        self.encoder = nn.Sequential(*list(models.resnet18(weights=models.ResNet18_Weights.IMAGENET1K_V1).children())[:-5])
         
         # Channel reduction layer to convert ResNet features to 3 channels for STN
         self.channel_reshape = nn.Conv2d(64, 3, kernel_size=1)
@@ -243,10 +247,10 @@ mouth_model = Drowness(num_classes)  # Model for detecting mouth states (open/cl
 # Load pre-trained model weights
 # These models have been trained specifically for eye and mouth state classification
 eye_model.load_state_dict(
-    torch.load("Model2_stn.pth", map_location=torch.device('cpu'))
+    torch.load("Model2_stn.pth", map_location=torch.device('cpu'), weights_only=True)
 )
 mouth_model.load_state_dict(
-    torch.load("Model_mouth_stn.pth", map_location=torch.device('cpu'))
+    torch.load("Model_mouth_stn.pth", map_location=torch.device('cpu'), weights_only=True)
 )
 
 # Move models to the appropriate device (GPU/CPU)
@@ -274,40 +278,30 @@ def predict(passed_model, image_path):
         dict: Dictionary containing the predicted state (0 or 1)
               0 = closed/inactive, 1 = open/active
     """
-    # Preprocess the image and move to device
-    image = load_image(image_path, transform).to(device)
-    
-    # Forward pass through the model
-    pred_state, stn_output = passed_model(image)
-    
-    # Convert logits to probabilities using softmax
-    pred_probs = torch.nn.functional.softmax(pred_state, dim=1).cpu().detach().numpy()
-    
-    # Get the predicted class (argmax of probabilities)
-    predicted_state = np.argmax(pred_probs, axis=1)
-    print(f"Predicted state: {predicted_state}")
-    
-    # Convert numpy array to integer for JSON serialization
-    predicted_state = int(predicted_state[0])
-    
-    # Prepare visualization data (convert tensors to numpy for plotting)
-    image_np = image.squeeze(0).permute(1, 2, 0).cpu().numpy()
-    stn_np = stn_output[0].permute(1, 2, 0).cpu().detach().numpy()
-    stn_np = np.clip(stn_np, 0, 1)  # Clip values to valid range for display
-
-    # Optional: Display original and transformed images side by side
-    plt.subplot(1, 2, 1)
-    plt.imshow(image_np)
-    plt.title('Original Image')
-
-    plt.subplot(1, 2, 2)
-    plt.imshow(stn_np)
-    plt.title('STN Transformed')
-
-    plt.show()
-
-    print(f"Prediction result: {{'state': {predicted_state}}}")
-    return {'state': predicted_state}
+    try:
+        # Preprocess the image and move to device
+        image = load_image(image_path, transform).to(device)
+        
+        # Forward pass through the model
+        with torch.no_grad():  # Disable gradient computation for inference
+            pred_state, stn_output = passed_model(image)
+        
+        # Convert logits to probabilities using softmax
+        pred_probs = torch.nn.functional.softmax(pred_state, dim=1).cpu().detach().numpy()
+        
+        # Get the predicted class (argmax of probabilities)
+        predicted_state = np.argmax(pred_probs, axis=1)
+        print(f"Predicted state: {predicted_state}")
+        
+        # Convert numpy array to integer for JSON serialization
+        predicted_state = int(predicted_state[0])
+        
+        print(f"Prediction result: {{'state': {predicted_state}}}")
+        return {'state': predicted_state}
+        
+    except Exception as e:
+        print(f"Prediction error: {e}")
+        return {'state': 0}  # Default to closed/inactive state on error
 
 
 # ============================================================================
@@ -369,10 +363,16 @@ def crop_face_and_return(image):
 #         return True
 
 
-prediction = []  #prediction array used to calculate the average
+prediction = []  # prediction array used to calculate the average
+
+# Global variables for analytics
+summ = 0    # Sum counter for engagement calculation
+timeyy = 0  # Timestamp for periodic calculations
+pred = -1   # Current prediction state
+last_pred = -1  # Previous prediction state
 
 
-#main application
+# main application
 @app.route('/')
 def index():
     """
@@ -381,7 +381,7 @@ def index():
     Returns:
         str: Welcome message
     """
-    return "Hello, World!"
+    return "Hocus Focus API - Drowsiness Detection Backend"
 
 
 @app.route('/video', methods=['POST'])
@@ -405,11 +405,11 @@ def generate_frames():
     """
     global pred, last_pred, prediction  # Use global variables for state persistence
 
-    # Initialize persistent variables on first request
-    if not hasattr(generate_frames, 'last_pred'):
-        last_pred = -1  # Previous prediction state
-    if not hasattr(generate_frames, 'pred'):
-        pred = -1  # Current prediction state
+    # # Initialize persistent variables on first request
+    # if not hasattr(generate_frames, 'last_pred'):
+    #     last_pred = -1  # Previous prediction state
+    # if not hasattr(generate_frames, 'pred'):
+    #     pred = -1  # Current prediction state
 
     # Validate image upload
     image_file = request.files.get('image')
@@ -473,7 +473,7 @@ def generate_frames():
         # Debug logging
         print(f'Last prediction: {last_pred}')
         print(f'Current prediction: {pred}')
-        print(f'Prediction history: {prediction}')
+        print(f'Prediction history length: {len(prediction)}')
         
     except Exception as e:
         print(f"Error processing image: {e}")
@@ -496,42 +496,37 @@ def stuff():
     
     Returns:
         JSON response containing:
-        - Engagement percentage (when 5 predictions are collected)
-        - Current state description ('Engaged', 'Absent', 'Disengaged')
+        - Current state description and engagement statistics
     """
-    global summ, timeyy
+    global summ, timeyy, pred, prediction
     
-    message = ''
+    message = 'No Data Available'
     
     # Process predictions only if we have data
-    if len(prediction):
-        # Update every 1 second (time-based processing)
-        while time.time() - timeyy > 1:
-            timeyy = time.time()
+    if len(prediction) > 0:
+        # Get the most recent prediction
+        latest_prediction = prediction[-1]
+        
+        # Provide real-time state feedback
+        if latest_prediction == 0:
+            current_state = 'Engaged'
+        elif latest_prediction == 1:
+            current_state = 'Drowsy'
+        elif latest_prediction == 2:
+            current_state = 'Yawning'
+        elif latest_prediction == -1:
+            current_state = 'Absent'
+        else:
+            current_state = 'Unknown'
             
-            # Calculate average engagement every 5 predictions
-            if len(prediction) % 5 == 0:
-                # Cap the sum at 5 for percentage calculation
-                if summ > 5:
-                    summ = 5
-                    
-                # Calculate engagement percentage
-                avg = (summ / 5) * 100
-                message = f'Engagement: {round(avg, 2)}%'
-                
-                # Reset counter for next calculation cycle
-                summ = 0
-            else:
-                # Provide real-time state feedback
-                latest_prediction = prediction[-1]  # Get most recent prediction
-                
-                if latest_prediction == 0:
-                    message = 'Engaged'
-                    summ += 1  # Count as engaged
-                elif latest_prediction == -1:
-                    message = "Absent"
-                else:  # latest_prediction == 1 or 2
-                    message = "Disengaged"
+        # Calculate engagement statistics over the last 10 predictions
+        if len(prediction) >= 10:
+            recent_predictions = prediction[-10:]
+            engaged_count = sum(1 for p in recent_predictions if p == 0)
+            engagement_percentage = (engaged_count / 10) * 100
+            message = f'Engagement: {engagement_percentage:.0f}% - Currently {current_state}'
+        else:
+            message = f'Currently {current_state} - Collecting data ({len(prediction)}/10)'
     
     return jsonify(result=message)
 
